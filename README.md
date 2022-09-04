@@ -77,8 +77,8 @@ int die = 0;
 ```
 
 ### Functions
-The 'GetWidth()' and 'GetHeight()' functions simply return the width and height of the dimensions the depth data is being recorded in (ie. resolution).
-'''
+The `GetWidth()` and `GetHeight()` functions simply return the width and height of the dimensions the depth data is being recorded in (ie. resolution).
+```
 /*
  * Function to be called from main program to return width of image.
  */
@@ -94,11 +94,11 @@ extern "C" int EXPORT_API GetHeight()
 {
 	return HEIGHT;
 } ;
-'''
+```
 
-The 'InitializePlugin()' function is called from the main program at the start of its execution. It first tries to open a ".txt" file to act as a log for program processes. 
+The `InitializePlugin()` function is called from the main program at the start of its execution. It first tries to open a ".txt" file to act as a log for program processes. 
 The function then initializes the global values of the plugin as well as the indices of both the grabber and processor thread.
-'''
+```
 /*
  * Function to initialize plugin.
  */
@@ -130,7 +130,7 @@ extern "C" int EXPORT_API InitializePlugin()
 	
 	return 1;
 } ;
-'''
+```
 
 
 
