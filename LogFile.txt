@@ -1,0 +1,11 @@
+Tue Dec 18 16:10:58 2018
+-(Freenect): Initializing Kinect...
+-(Freenect): freenect_init() success!
+-(Freenect): Number of devices found: 1
+-(Freenect): Successfully opened device
+-(Grabber Thread): pthread_create Success.
+-(Grabber Thread): Started.
+-(Process Thread): pthread_create Success.
+-(Process Thread): Started.
+-(Process Thread): Ended.
+-(Grabber Thread): Ended.
