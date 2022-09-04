@@ -77,7 +77,7 @@ int die = 0;
 ```
 
 ### Functions
-
+---
 #### `GetWidth()` and `GetHeight()`
 The `GetWidth()` and `GetHeight()` functions simply return the width and height of the dimensions the depth data is being recorded in (ie. resolution).
 ```
@@ -97,7 +97,7 @@ extern "C" int EXPORT_API GetHeight()
 	return HEIGHT;
 } ;
 ```
-
+---
 #### `InitializePlugin()`
 The `InitializePlugin()` function is called from the main program at the start of its execution. It first tries to open a ".txt" file to act as a log for program processes. 
 The function then initializes the global values of the plugin as well as the indices of both the grabber and processor thread.
@@ -134,7 +134,7 @@ extern "C" int EXPORT_API InitializePlugin()
 	return 1;
 } ;
 ```
-
+---
 #### `InitializeDevice()`
 The `InitializeDevice()` function is called from the main program to attempt and establish a connection with the Kinect device. It first attempts to initialize the 
 connection, followed by detecting the number of devices connected, and finishes by attempting to open the device to communication. All of the steps are 
@@ -172,7 +172,7 @@ extern "C" int EXPORT_API InitializeDevice()
 	return 1;
 } ;
 ```
-
+---
 #### `AllocateMemory()`
 At the initialization of the program, the `AllocateMemory()` function is called from the C# script to allocate memory for the 3 frames stored at any point during runtime.
 ```
@@ -191,9 +191,82 @@ extern "C" int EXPORT_API AllocateMemory()
 	}
 } ;
 ```
-
-
-
+---
+#### `FreeAllocatedMemory()`
+The `FreeAllocatedMemory()` function is called from the main program to attempt and free up the memory associated with the pointer passed to function. 
+If it fails it will log the failure in the log file as well as return `FALSE`, otherwise it will return `TRUE`.
+```
+/*
+ * Function to free allocated memory for return pointer from main program.
+ */
+extern "C" int EXPORT_API FreeAllocatedMemory(int *arrayPtr)
+{
+	try {
+		delete[] arrayPtr;
+		return 1;
+	} catch (const char* msg) {
+		writeToLog("-Memory Deallocation Failed.\n");
+		return 0;
+	}
+} ;
+```
+---
+#### `StartThreads()`
+The `StartThreads()` function simply attempts to create the grabber and processor threads and logs the result (Success or Failure). I used the **pthread** library to 
+implement the multithreaded aspect of the program due to my familiarity with the library and its built in mutex lock system. Using a unique lock for each frame 
+helped to avoid any potential race conditions, as well as locks for the log file output, ready frame data, and next frame data. It will return `TRUE` if both threads 
+are created successfully, otherwise will return `FALSE`.
+```
+/*
+ * Function to attempt and create the grabber and processor threads.
+ */
+extern "C" int EXPORT_API StartThreads()
+{
+	int err;
+	err = pthread_create(&grabber_thread.thread, NULL, grabberThreadFunc, NULL);	// try to start grabber thread
+	if(err) {
+		writeToLog("-(Grabber Thread): pthread_create Failed.\n");
+		return 0;
+	} else {
+		writeToLog("-(Grabber Thread): pthread_create Success.\n");
+	}
+	err = pthread_create(&processor_thread.thread, NULL, processorThreadFunc, NULL);	// try to start processing thread
+	pthread_mutex_lock(&log_lock);
+	if(err) {
+		writeToLog("-(Process Thread): pthread_create Failed.\n");
+		return 0;
+	} else {
+		writeToLog("-(Process Thread): pthread_create Success.\n");
+	}
+	pthread_mutex_unlock(&log_lock);
+	return 1;
+} ;
+```
+---
+#### `depth_cb()`
+The `depth_cb()` function is set as a callback function to receive depth data streaming from the Kinect through the libfreenect library. It is called whenever a new frame is 
+collected by the device, and if it has not gotten a new frame since processing the previous one then it will lock the `next_frame_lock mutex`, collect the data, then release 
+the mutex lock.
+```
+/*
+ * Callback function for depth data from Kinect device.
+ */
+void depth_cb(freenect_device *dev, void *v_depth, uint32_t timestamp)
+{
+	if(got_depth == 0)
+	{
+		pthread_mutex_lock(&next_frame_lock);
+		uint16_t *depth = (uint16_t*)v_depth;
+		for(int i = 0; i < WIDTH*HEIGHT; i++)
+		{
+			depth_mid_16bit[i] = depth[i];
+		}
+		got_depth++;
+		frame_count++;
+		pthread_mutex_lock(&next_frame_lock);
+	}
+}
+```
 
 
 
