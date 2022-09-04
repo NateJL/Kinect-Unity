@@ -267,12 +267,214 @@ void depth_cb(freenect_device *dev, void *v_depth, uint32_t timestamp)
 	}
 }
 ```
+---
+#### `IsFrameReady()`
+The `IsFrameReady()` function is called by the main program to check if there is an available frame to grab. If this function 
+returns `TRUE` then the main program will attempt to call the `GetReadyFrameByteArray()` function.
+```
+/*
+ * Function.
+ */
+extern "C" int EXPORT_API IsFrameReady()
+{
+	return frame_ready;
+}
+```
+---
+#### `GetReadyFrameByteArray()`
+The `GetReadyFrameByteArray()` function is called outside of the plugin script by the main program to return the current ready frame. Due to the low-level communication 
+between the plugin and the main program, the array of 16-bit values must be converted to an array of 8-bit (1 byte) values. The function does this by taking one element 
+from the 16-bit array and storing it in 2 adjacent array elements in the 8-bit array, ie:
 
+`16bit_arr[0] = 0101001011101001`
+will be returned as:
 
+`8bit_arr[0] = 01010010`
 
+`8bit_arr[1] = 11101001`
+```
+/*
+ * Returns a pointer array of byte values,
+ * length is (width*height)*2 since we are returning an 8-bit array storing 16-bit values.
+ */
+extern "C" uint16_t * EXPORT_API GetReadyFrameByteArray()
+{
+	uint8_t *temp = new  uint8_t[WIDTH*HEIGHT*2];
+	pthread_mutex_lock(&ready_frame_lock);
+	int index_8bit = 0;
+	int index_16bit = 0;
+	while(index_16bit < WIDTH*HEIGHT)
+	{
+		temp[index_8bit++] = ready_16bit_frame[index_16bit] & 0xff;
+		temp[index_8bit++] = (ready_16bit_frame[index_16bit++] >> 8);
+	}
+	frame_ready = FALSE;
+	pthread_mutex_unlock($ready_frame_lock);
+	return temp;
+}
+```
+---
+#### `*grabberThreadFunc()`
+The `*grabberThreadFunc()` function is used as the main function for the grabber thread to operate. It runs continuously from start, checking if there is a new frame 
+available from the Kinect. If a new frame is received then it locks the mutex for the current frame index, copies the new frame to that element, and then releases the lock. 
+it then increments the index and waits for another new frame to be received.
+```
+/*
+ * Main function for the grabber thread  to handle getting
+ * depth data from Kinect.
+ */
+void *grabberThreadFunc(void *arg)
+{
+	int grabber_frame_count = 0;
+	pthread_mutex_lock(&log_lock);
+	writeToLog("-(Grabber Thread): Started.\n");
+	pthread_mutex_unlock(&log_lock);
+    
+	freenect_set_tilt_degs(f_dev,freenect_angle);
+	freenect_set_led(f_dev,LED_RED);
+	freenect_set_depth_callback(f_dev, depth_cb);
+	freenect_set_depth_mode(f_dev, freenect_find_depth_mode(FREENECT_RESOLUTION_MEDIUM, FREENECT_DEPTH_11BIT));
+	
+	freenect_start_depth(f_dev);
+	
+	while(!die && freenect_process_events(f_ctx) >= 0)
+	{
+		if(grabber_thread.current_index >= NUM_FRAMES)      // if index out of range go back to 0
+		grabber_thread.current_index = 0;
+        
+		pthread_mutex_lock(&frame_list[grabber_thread.current_index].frame_lock);   // acquire the current index frame lock
+		if(frame_list[grabber_thread.current_index].free && got_depth)                           // if the lock is free:
+		{
+			pthread_mutex_lock(&next_frame_lock);
+			for(int i = 0; i < WIDTH*HEIGHT; i++)
+			{
+				frame_list[grabber_thread.current_index].depth_16bit[i] = depth_mid_16bit[i];
+			}
+			pthread_mutex_unlock(&next_frame_lock);
+            
+			frame_list[grabber_thread.current_index].free = FALSE;                          // frame is no longer free
+			pthread_mutex_unlock(&frame_list[grabber_thread.current_index].frame_lock);
 
+			grabber_thread.current_index++;
+			grabber_frame_count++;
+			got_depth = 0;
+		} else {
+			pthread_mutex_unlock(&frame_list[grabber_thread.current_index].frame_lock);
+		}
+        
+		running=TRUE;
+	}
+	running = FALSE;
 
-
+	freenect_stop_depth(f_dev);
+	freenect_close_device(f_dev);
+	freenect_shutdown(f_ctx);
+    
+	pthread_mutex_lock(&log_lock);
+	writeToLog("-(Grabber Thread): Ended.\n");
+	pthread_mutex_unlock(&log_lock);
+	pthread_exit(NULL);
+}
+```
+---
+#### `*processorThreadFunc()`
+The `*processorThreadFunc()` function is used as the main function for the processor thread to operate. It runs continuously alongside the grabber thread waiting to 
+process any new frames added by the grabber thread. If the current frame is not the same as the previously processed frame, it will attempt to lock the mutex for that 
+frame and check if it is free to process. It then locks the mutex for the current ready frame (that will be read by the main program), copies the current frame to the ready 
+frame, then releases the ready frame mutex and waits to process the next frame.
+```
+/*
+ * Main function for the processor thread that handles getting the
+ * raw depth data ready for Unity
+ */
+void *processorThreadFunc(void *arg)
+{
+	int processor_frame_count = 0;
+	while(!running) {}              // wait for signal from grabber to start
+	pthread_mutex_lock(&log_lock);
+	writeToLog("-(Process Thread): Started.\n");
+	pthread_mutex_unlocklock(&log_lock);
+    
+	int last = -1;
+	while(running)          // While the grabber thread is still running
+	{
+		if(last != processor_thread.current_index)      // if we are not processing the same frame
+		{
+			if(processor_thread.current_index >= NUM_FRAMES)
+				processor_thread.current_index = 0;
+            
+			pthread_mutex_lock(&frame_list[processor_thread.current_index].frame_lock);     // acquire current frame lock
+			if(!frame_list[processor_thread.current_index].free)                            // if the frame is not free:
+			{
+                
+//==================================================== Processing Section ==========================================
+				pthread_mutex_lock(&ready_frame_lock);          // acquire lock for current ready frame
+				frame_ready = FALSE;                            // frame is not ready
+				for(int i = 0; i < WIDTH*HEIGHT; i++)
+				{
+					current_frame[i] = (int) frame_list[processor_thread.current_index].depth_16bit[i];
+					ready_16bit_frame[i] = frame_list[processor_thread.current_index].depth_16bit[i];
+				}
+				frame_ready = TRUE;
+				pthread_mutex_unlock(&ready_frame_lock);  // release lock for current ready frame
+//==================================================================================================================
+                
+				frame_list[processor_thread.current_index].free = TRUE;                     // free the current frame
+                
+				pthread_mutex_unlock(&frame_list[processor_thread.current_index].frame_lock);   // release current frame lock
+				last = processor_thread.current_index;                                          // set last to current index
+				processor_thread.current_index++;                                               // increment index
+				processor_frame_count++;
+			} else {
+				pthread_mutex_unlock(&frame_list[processor_thread.current_index].frame_lock);
+			}
+		}
+	}
+    
+	pthread_mutex_lock(&log_lock);
+	writeToLog("-(Process Thread): Ended.\n");
+	pthread_mutex_unlock(&log_lock);
+	pthread_exit(NULL);
+}
+```
+---
+#### `ShutdownDevice()`
+The `ShutdownDevice()` function is used by the main program to safely termiate the active threads as well as shut down the Kinect device.
+```
+/*
+ * Function to be called from the main program to properly end threads and shut down device.
+ */
+extern "C" int EXPORT_API ShutdownDevice()
+{
+	if(!die {
+		die = TRUE;
+		return 1;
+	} else {
+		return 0;
+	}
+}
+```
+---
+#### `writeToLog()`
+The `writeToLog()` functions are simply called when a process wants to write a message to the log file. There are two functions with different 
+parameters to allow for different variable types to be written to the log.
+```
+/*
+ * Functions to write input to log file.
+ */
+void writeToLog(char logEntry[])
+{
+	FILE* fp = fopen("LogFile.txt, "a");
+		fprintf(fp, logEntry);
+		fclose(fp);
+}
+void writeToLog(const char* logEntry)
+{
+	FILE* fp = fopen("LogFile.txt, "a");
+		fprintf(fp, logEntry);
+		fclose(fp);
+}
+```
 
 
 
