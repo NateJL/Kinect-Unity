@@ -22,7 +22,7 @@ The space bar will clear all current pixels painted on to the overlay texture.
 ## Documentation
 
 ### Plugin 
-[Libfreenect Github](https://github.com/OpenKinect/libfreenect)
+[Libfreenect Github](https://github.com/OpenKinect/libfreenect) **|**
 [OpenKinect Website](https://openkinect.org/wiki/Main_Page)
 
 In order to communicate with the Kinect V1 device, this program uses the OpenKinect communities libfreenect library. The library allows full control of a connected 
