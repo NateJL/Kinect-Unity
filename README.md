@@ -19,6 +19,12 @@ Kinect and should be updating the texture of the plane in real-time. Based off o
 drawn in the overlay texture like "painting". The default paint color is green, although it can be changed to red by pressing the 'R' key or blue by pressing the 'B' key. 
 The space bar will clear all current pixels painted on to the overlay texture.
 
+### Display
+To display the depth data returned from the Kinect, there is a plane object that acts as the "window" to draw to. Attached to this plane is a custom rendering script that 
+dynamically creates and modifies the texture at runtime. The depth data is drawn to the texture in a RGBA32 texture format with 8-bits per channel (red, green, blue, alpha) 
+and a resolution of 640x480 to match the resolution of the Kinect depth camera. As the depth data is read into the texture, the values are analyzed to check if any pixels are 
+within the drawing threshold, if so they are added to a list of indices to be used to draw pixels on to the overlay texture.
+
 ## Documentation
 
 ### Plugin 
@@ -476,7 +482,455 @@ void writeToLog(const char* logEntry)
 }
 ```
 
+### Unity Scripts
+---
+#### `Kinect.cs`
+This script acts as an object to communicate with the C++ plugin from the Unity side. All of the external functions imported from the .dll plugin file are located here, as 
+well as handling the initialization and shutdown of the Kinect device. From the initialization function the script manually allocates memory, establishes a connection with the 
+Kinect, and starts the threads for the plugin. Since nearly all other scripts in the environment need information from the Kinect in order to operate, it is a static class 
+thus does not need an active instance to operate.
+```
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using UnityEngine;
+/// <summary>
+/// Static class to hold all function related to communicating with the c++ plugin that
+/// handles all Kinect interactions.
+/// @author Nathan Larson 12/18/18
+/// 
+/// </summary>
+public class Kinect : MonoBehavior
+{
+	public static int frameWidth = 640;
+	public static int frameHeight = 480;
+	
+	public static Boolean initialized;
+	
+	[DllImport("Kinect2Unity")]
+	private static extern int GetWidth();		// get frame width
+	
+	[DllImport("Kinect2Unity")]
+	private static extern int GetHeight();		// get frame height
+	
+	[DllImport("Kinect2Unity")]
+	private static extern int InitializePlugin();		// initialize the plugin
+	
+	[DllImport("Kinect2Unity")]
+	private static extern int AllocateMemory();		// allocated memory space for plugin
+	
+	[DllImport("Kinect2Unity")]
+	private static extern int InitializeDevice();		// initialize the freenect device
+	
+	[DllImport("Kinect2Unity")]
+	private static extern int StartThreads();		// start the grabber and processor threads
+	
+	[DllImport("Kinect2Unity")]
+	private static extern int IsFrameReady();		// returns if there is a frame ready or not
+	
+	[DllImport("Kinect2Unity")]
+	private static extern int GetReadyFrameByteArray();		// return a byte[] with raw depth values
+	
+	[DllImport("Kinect2Unity")]
+	private static extern int FreeAllocatedMemory(IntPtr ptr);		// free allocated memory referenced by IntrPtr argument
+	
+	[DllImport("Kinect2Unity")]
+	private static extern int ShutdownDevice();		// safely shutdown threads and Kinect device
+	
+	
+	public static Boolean Initialize()
+	{
+		string output = "Getting Frame Dimensions...";
+		frameWidth = GetWidth();
+		frameHeight = GetHeight();
+		output += "Done.\nWidth: " + frameWidth + "\nHeight: " + frameHeight + "\n";
+		
+		output = "Initializing Plugin...";
+		if(InitializePlugin() == 1){
+			Debug.Log(output + "Success.");
+		} else {
+			Debug.Log(output + "Failed.");
+			return false;
+		}
+		
+		output = "Allocating Memory...";
+		if(AllocateMemory() == 1){
+			Debug.Log(output + "Success.");
+		} else {
+			Debug.Log(output + "Failed.");
+			return false;
+		}
+		
+		output = "Initializing Device...";
+		if(InitializeDevice() == 1){
+			Debug.Log(output + "Success.");
+		} else {
+			Debug.Log(output + "Failed.");
+			return false;
+		}
+		
+		output = "Starting Threads...";
+		if(StartThreads() == 1){
+			Debug.Log(output + "Success.");
+		} else {
+			Debug.Log(output + "Failed.");
+			return false;
+		}
+		return true;
+	}
+	
+	/*
+	 * Boolean wrapper for plugin frame ready check
+	 */
+	public static Boolean FrameReady()
+	{
+		if(IsFrameReady() == 1)
+			return true;
+		else
+			return false;
+	}
+	
+	/*
+	 * Return a ushort array representation of the original frame,
+	 * returned from the plugin as a byte[] array.
+	 */
+	public static ushort[] Get16BitArray(IntPtr byte_pointer)
+	{
+		byte[] returned_byte_array = new byte[frameWidth * frameHeight * 2];
+		Marshall.Copy(byte_pointer, returned_byte_array, 0, frameWidth * frameHeight * 2);
+		
+		ushort[] frame_16bit = new ushort[frameWidth * frameHeight];
+		Buffer.BlockCopy(returned_byte_array, 0, frame_16bit, 0, frameWidth * frameHeight * 2);
+		return frame_16bit;
+	}
+	
+	/*
+	 * Function to free the memory at the IntPtr parameters address
+	 */
+	public static void FreeMemory(IntPtr ptr)
+	{
+		if(FreeAllocatedMemory(ptr) != 1)
+			Debug.Log("Failed to free memory at: " + ptr.ToString());
+	}
+	
+	/*
+	 * Function to call the shutdown function within the plugin to properly shutdown threads and Kinect
+	 */
+	public static void ShutDown()
+	{
+		if(ShutdownDevice() == 1)
+			Debug.Log("Successfully shutdown Device. ");
+	}
+}
+```
+---
+#### `Manager.cs`
+The manager acts as the main "driver" for the scene, being the only script that contains an update function that is called every frame in order to maintain 
+straightforward synchronization. At the start of the programs execution, this script will do some minor checks to make sure it is ready to run, then call the kinect script 
+Initialize function to begin setting up the Kinect device.
+```
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using UnityEngine;
+/// <summary>
+/// Main Scene manager script to handle data assignments and assist
+/// communication between scripts.
+/// @author Nathan Larson 12/18/18
+/// 
+/// </summary>
+public class Manager : MonoBehavior
+{
+	public GameObject texturePlane;
+	public Renderer textureRenderer;
+	
+	public GameObject drawPlane;
+	private DrawScript draw_script;
+	
+	public List<int> depth_index_list;
+	
+	public Color draw_color;
+	
+	public ushort maxDepthBound = 868;
+	public ushort minDepthBound = 850;
+	
+	// Use this for initialization
+	void Start()
+	{
+		Debug.Log("Starting Manager...");
+		depth_index_list = new List<int>();
+		draw_color = new Color(0, 1, 0, 1);
+		textureRenderer = texturePlane.GetComponent<Renderer>();
+		draw_script = drawPlane.GetComponent<DrawScript>();
+		
+		Kinect.initialized = false;
+		Kinect.initialized = Kinect.Initialize();
+		Debug.Log("Kinect Initialized: " + Kinect.initialized);
+	}
+	
+	// Update is called once per frame
+	void Update()
+	{
+		if (Kinect.FrameReady() && Kinect.initialized)
+		{
+			try
+			{
+				IntPtr byte_pointer = Kinect.GetReadyFrameByteArray();
 
+				ushort[] newFrame = Kinect.Get16BitArray(byte_pointer);
 
+				texturePlane.GetComponent<RenderScript>().SetTexturePixels16bit(newFrame);
+				drawPlane.GetComponent<DrawScript>().CheckPixels();
+				Kinect.FreeMemory(byte_pointer);
+			} catch (Exception e)
+			{
+				Debug.Log("Failed: " + e);
+			}
+		}
 
+		if (Input.GetKeyUp(KeyCode.Space)){
+			draw_script.ClearAllTexturePixels();
+		}
+		else if (Input.GetKeyUp(KeyCode.R)) {
+			draw_color = Color.red;
+		}
+		else if (Input.GetKeyUp(KeyCode.G)){
+			draw_color = Color.green;
+		}
+		else if (Input.GetKeyUp(KeyCode.B)){
+			draw_color = Color.blue;
+		}
+	}
+	
+	/* 
+	 * Called when the application is exited
+	 */
+	void OnApplicationQuit()
+	{
+		Kinect.ShutDown();
+		Debug.Log("Goodbye.");
+	}
+}
+```
+---
+#### `DrawScript.cs`
+This script handles the "drawing" input from the user based off of their distance/depth from the camera and whether or not the distance is within the threshold. 
+If the depth value at a certain point is within the threshold, the selected color will be drawn on the overlay texture by this script.
+```
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+/// <summary>
+/// Script attached to the overlay texture used for drawing pixels to the texture
+/// based off of the users depth values and bounds.
+/// @author Nathan Larson 12/18/18
+/// 
+/// </summary>
+public class DrawScript : MonoBehavior
+{
+	public Manager manager;
 
+	public Texture2D texture;
+	private TextureFormat format;
+
+	// Use this for initialization
+	void Start () 
+	{
+		format = TextureFormat.RGBA32;
+		texture = new Texture2D(Kinect.frameWidth, Kinect.frameHeight, format, false);
+		GetComponent<Renderer>().material.mainTexture = texture;
+		ClearAllTexturePixels();
+	}
+	
+	/*
+	 * Clear all the pixels in the texture and set them to transparent
+	 */
+	 public void ClearAllTexturePixels()
+	 {
+		var data = texture.GetRawTextureData<Color32>();
+
+		for (int i = 0; i < data.Length; i++)
+			data[i] = new Color32(0, 0, 0, 0);
+
+		texture.Apply();
+	}
+
+	/*
+	 * get the list of indexes where the depth data values are within the threshold
+	 */
+	public void CheckPixels()
+	{
+		var data = texture.GetRawTextureData<Color32>();
+		int[] index_list = manager.depth_index_list.ToArray();
+		for (int i = 0; i < index_list.Length; i++)
+		{
+			data[index_list[i]] = manager.draw_color;
+		}
+		texture.Apply();
+	}
+}
+```
+---
+#### `RenderScript.cs`
+This script handles the rendering of the depth data that is received from the Kinect. The data is altered slighlty to give a better image, then converted to a RGBA value 
+using the bytes stored in the given array. A darker image means the distance from the camera is greater, while a lighter color means the distance is smaller.
+```
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+/// <summary>
+/// Script to handle the texture and rendering of the depth data taken from
+/// the Kinect.
+/// @author Nathan Larson 12/18/18
+/// 
+/// </summary>
+public class RenderScript : MonoBehavior
+{
+	public Manager manager;
+
+	public float MAX_16BIT_VALUE = 65536;
+	public float MAX_11BIT_VALUE = 2048;
+
+	public Texture2D texture;
+	private TextureFormat format;
+
+	public GameObject drawPlane;
+
+	/*
+	 * Initialize the texture and format
+	 */
+	void Start()
+	{
+		format = TextureFormat.RGBA32;
+		texture = new Texture2D(Kinect.frameWidth, Kinect.frameHeight, format, false);
+		GetComponent<Renderer>().material.mainTexture = texture;
+
+		SetAllTexturePixels(0);
+	}
+	
+	/*
+	 * Function to set the ushort[] array input to the textures pixel array
+	 * @param ushort[]
+	 */
+	public void SetTexturePixels16bit(ushort[] newPixels)
+	{
+		manager.depth_index_list.Clear();
+		var data = texture.GetRawTextureData<Color32>();
+		for (int i = 0; i < data.Length; i++)
+		{
+			byte value = (byte)newPixels[i];
+			if(newPixels[i] > manager.minDepthBound && newPixels[i] < manager.maxDepthBound)
+			{
+				manager.depth_index_list.Add(i);
+			}
+
+			Color32 new_color;
+			new_color = new Color32(value, value, value, 1);
+			data[i] = new_color;
+		}
+		texture.Apply();
+	}
+
+	/*
+	 * Return array of Colors representing each pixel in the texture.
+	 */
+	public Color[] GetColors()
+	{
+		return texture.GetPixels();
+	}
+	
+	/*
+	 * Set the color of all pixels from given byte[] array.
+	 */
+	public void SetTexturePixels8bit(byte[] newPixels)
+	{
+		var data = texture.GetRawTextureData<Color32>();
+		for (int i = 0; i < data.Length; i++)
+		{
+			Color32 new_color = new Color32(newPixels[3*i+0], newPixels[3*i+1], newPixels[3*i+2], 255);
+			data[i] = new_color;
+		}
+		texture.Apply();
+	}
+
+	/*
+	 * Set all pixel colors to the same value from the given byte.
+	 */
+	public void SetAllTexturePixels(byte one_value)
+	{
+		var data = texture.GetRawTextureData<Color32>();
+
+		for (int i = 0; i < data.Length; i++)
+			data[i] = new Color32(one_value, one_value, one_value, 0);
+
+		texture.Apply();
+	}
+}
+```
+---
+#### `UIManager.cs`
+This script is not vital to the operation of the program itself, it acts as more of a utility to allow easier modification and displaying of data on the screen. 
+It calculates an approximate frames per second to display on the screen, as well as allowing the user to alter the min and max threshold values without halting the execution.
+```
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UI;
+/// <summary>
+/// Script to handle displaying and updating the UI values such as FPS and min/max distance threshold.
+/// @author Nathan Larson 12/18/18
+/// 
+/// </summary>
+public class UIManager : MonoBehavior
+{
+	public Manager manager;
+
+	public Canvas mainCanvas;
+	public GameObject framerateText;
+	public GameObject drawColorBox;
+
+	public InputField minDepthBoundField;
+	public InputField maxDepthBoundField;
+
+	// Use this for initialization
+	void Start () 
+	{
+		mainCanvas.renderMode = RenderMode.WorldSpace;
+		mainCanvas.transform.position.Set(mainCanvas.transform.position.x, mainCanvas.transform.position.y, -1);
+		framerateText.GetComponent<Text>().text = "FPS: null";
+		drawColorBox.GetComponent<Image>().color = Color.black;
+
+		minDepthBoundField.contentType = InputField.ContentType.IntegerNumber;
+		minDepthBoundField.characterLimit = 4;
+		minDepthBoundField.text = manager.minDepthBound.ToString();
+		maxDepthBoundField.contentType = InputField.ContentType.IntegerNumber;
+		maxDepthBoundField.characterLimit = 4;
+		maxDepthBoundField.text = manager.maxDepthBound.ToString();
+	}
+	
+	// Update is called once per frame
+	void Update () 
+	{
+		framerateText.GetComponent<Text>().text = "FPS: " + (1.0f / Time.smoothDeltaTime).ToString();
+		drawColorBox.GetComponent<Image>().color = manager.draw_color;
+	}
+
+	/*
+	 * callback function for lower depth bound input field
+	 */
+	public void setLowerDepthBound()
+	{
+		manager.minDepthBound = ushort.Parse(minDepthBoundField.text);
+		Debug.Log("Min: " + manager.minDepthBound);
+	}
+
+	/*
+	 * callback function for upper depth bound input field
+	 */
+	public void setUpperDepthBound()
+	{
+		manager.maxDepthBound = ushort.Parse(maxDepthBoundField.text);
+		Debug.Log("Max: " + manager.maxDepthBound);
+	}
+}
+```
