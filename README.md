@@ -77,6 +77,8 @@ int die = 0;
 ```
 
 ### Functions
+
+#### `GetWidth()` and `GetHeight()`
 The `GetWidth()` and `GetHeight()` functions simply return the width and height of the dimensions the depth data is being recorded in (ie. resolution).
 ```
 /*
@@ -96,6 +98,7 @@ extern "C" int EXPORT_API GetHeight()
 } ;
 ```
 
+#### `InitializePlugin()`
 The `InitializePlugin()` function is called from the main program at the start of its execution. It first tries to open a ".txt" file to act as a log for program processes. 
 The function then initializes the global values of the plugin as well as the indices of both the grabber and processor thread.
 ```
@@ -132,8 +135,62 @@ extern "C" int EXPORT_API InitializePlugin()
 } ;
 ```
 
+#### `InitializeDevice()`
+The `InitializeDevice()` function is called from the main program to attempt and establish a connection with the Kinect device. It first attempts to initialize the 
+connection, followed by detecting the number of devices connected, and finishes by attempting to open the device to communication. All of the steps are 
+logged in the log file and will return either `TRUE` or `FALSE` to signal success or failure to establish a connection.
+```
+/*
+ * Function.
+ */
+extern "C" int EXPORT_API InitializeDevice()
+{
+	writeToLog("-(Freenect): Initializing Kinect...\n");
+	if(freenect_init(&f_ctx, NULL) < 0)
+	{
+		writeToLog("-(Freenect): freenect_init() failed.\n");
+		return 0;
+	} else {
+		writeToLog("-(Freenect): freenect_init() success!\n");
+	}
+	freenect_set_log_level(f_ctx, FREENECT_LOG_DEBUG);
+	
+	int nr_devices = freenect_num_devices (f_ctx);
+	char initLog[64];
+	snprintf(initLog, sizeof(initLog),"-(Freenect): Number of devices found: %d\n", nr_devices);
+	writeToLog(initLog);
+	int user_device_number = 0;
+	if(nr_devices < 1)
+		return 0;
+	if (freenect_open_device(f_ctx, &f_dev, user_device_number) < 0)
+	{
+		writeToLog("-(Freenect): Could not open device\n");
+		return 0;
+	} else {
+		writeToLog("-(Freenect): Successfully opened device\n");
+	}
+	return 1;
+} ;
+```
 
-
+#### `AllocateMemory()`
+At the initialization of the program, the `AllocateMemory()` function is called from the C# script to allocate memory for the 3 frames stored at any point during runtime.
+```
+extern "C" int EXPORT_API AllocateMemory()
+{
+	try {
+		for(int i = 0; i < NUM_FRAMES; i++)
+		{
+			frame_list[i].depth_16bit = (uint16_t*)malloc(WIDTH*HEIGHT*sizeof(uint16_t));
+			frame_list[i].frame_lock = PTHREAD_MUTEX_INITIALIZER;
+			frame_list[i].free = TRUE;
+		}
+		current_frame = new int[WIDTH*HEIGHT];
+		ready_16bit_frame = new uint16_t[WIDTH*HEIGHT];
+		depth_mid_16bit = (uint16_t*)malloc(WIDTH*HEIGHT*sizeof(uint16_t)
+	}
+} ;
+```
 
 
 
